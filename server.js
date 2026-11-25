@@ -21,7 +21,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // an overloaded model. Lite first: it is the reliable one right now and has the
 // bigger free quota (500 calls/day vs ~20 for 3.8-flash).
 const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite,gemini-3.8-flash').split(',').map(s => s.trim()).filter(Boolean);
-const VERSION = '1.2-switch';
+const VERSION = '1.3-smart';
 const BOT_STATE_FILE = path.join(__dirname, 'bot-state.json');
 const API_BASE = 'https://backend.e99shop.com/api/v2/products';
 const GRAPH_API = 'https://graph.facebook.com/v21.0/me/messages';
@@ -141,7 +141,7 @@ const CONCEPTS = [
   { words: ['lip liner', 'লিপলাইনার', 'লিপ লাইনার', 'lipliner'], concept: 'lip liner' },
   { words: ['eyeliner', 'আইলাইনার', 'eye liner'], concept: 'eyeliner' },
   { words: ['lipstick', 'লিপস্টিক', 'লিপিষ্টিক'], concept: 'lipstick' },
-  { words: ['lip gloss', 'লিপগ্লস', 'লিপ গ্লস'], concept: 'lip gloss' },
+  { words: ['lip gloss', 'লিপগ্লস', 'লিপ গ্লস', 'লিপ গ্লোজ', 'গ্লোজ', 'গ্লস'], concept: 'lip gloss' },
   { words: ['lip balm', 'লিপবাম', 'লিপ বাম'], concept: 'lip balm' },
   { words: ['bag', 'ব্যাগ', 'হ্যান্ডব্যাগ', 'handbag', 'purse', 'পার্স'], concept: 'bag' },
   { words: ['watch', 'ঘড়ি', 'ঘড়ি'], concept: 'watch' },
@@ -179,6 +179,37 @@ function findConcept(text) {
   return null;
 }
 
+// Bengali phonetic spelling -> English word. Customers write product names
+// the way they sound in Bengali ("বিউটি গ্লেজড লিপ গ্লোজ") while the catalog
+// names are English ("Beauty Glazed ... Lip Gloss") — without this map the
+// search finds nothing and the bot falls back to "can't help". Keys are
+// normalized Bengali tokens; values are the English words to match with.
+const TRANSLIT = {
+  'বিউটি': 'beauty', 'গ্লেজড': 'glazed', 'গ্লোজ': 'gloss', 'গ্লস': 'gloss', 'গ্লোস': 'gloss',
+  'লিপ': 'lip', 'লাইনার': 'liner', 'আইলাইনার': 'eyeliner', 'লিপস্টিক': 'lipstick', 'লিপিষ্টিক': 'lipstick',
+  'দুল': 'earring', 'কানেরদুল': 'earring', 'কানের': 'earring', 'ঝুমকা': 'earring', 'চাঁদবালি': 'earring', 'চান্দবালি': 'earring',
+  'নেকলেস': 'necklace', 'হার': 'necklace', 'চেইন': 'chain', 'পেনডেন্ট': 'pendant',
+  'আংটি': 'ring', 'আং': 'ring', 'চুড়ি': 'bangle', 'চুড়ি': 'bangle', 'ব্রেসলেট': 'bracelet',
+  'কাজল': 'kajal', 'মাস্কারা': 'mascara', 'ফাউন্ডেশন': 'foundation', 'ক্রিম': 'cream',
+  'শ্যাম্পু': 'shampoo', 'পারফিউম': 'perfume', 'সানগ্লাস': 'sunglass',
+  'নেইলপলিশ': 'nail polish', 'নেইল': 'nail', 'পলিশ': 'polish', 'মেকআপ': 'makeup',
+  'জুয়েলারি': 'jewellery', 'জুয়েলারী': 'jewellery', 'গহনা': 'jewellery',
+  'চুল': 'hair', 'হেয়ার': 'hair', 'বেবি': 'baby', 'শিশু': 'baby', 'কিচেন': 'kitchen', 'রান্নাঘর': 'kitchen',
+  'মোমবাতি': 'candle', 'কম্বল': 'blanket', 'বোতল': 'bottle', 'খেলনা': 'toy', 'চকলেট': 'chocolate',
+  'ঘড়ি': 'watch', 'ঘড়ি': 'watch', 'ব্যাগ': 'bag', 'হ্যান্ডব্যাগ': 'handbag', 'পার্স': 'purse',
+  'প্লাম্পিং': 'plumping', 'গ্লো': 'glow', 'ম্যাট': 'matte', 'ম্যাট': 'matte',
+  'ওয়াটারপ্রুফ': 'waterproof', 'লং': 'long', 'লাস্টিং': 'lasting', 'অয়েল': 'oil', 'তেল': 'oil',
+  'কনসিলার': 'concealer', 'প্রাইমার': 'primer', 'সিরাম': 'serum', 'টোনার': 'toner', 'ফেসওয়াশ': 'facewash',
+  'কালার': 'color', 'রং': 'color', 'সেট': 'set', 'প্যাক': 'pack', 'গিফট': 'gift', 'বক্স': 'box',
+  'ম্যাজিক': 'magic', 'সুইট': 'sweet', 'মিন্ট': 'mint', 'জেলি': 'jelly', 'রোড': 'rhode', 'জর্ডানা': 'jordana',
+};
+// Query tokens translated to English where a Bengali spelling is known, so
+// "বিউটি গ্লেজড লিপ গ্লোজ" becomes "beauty glazed lip gloss" before matching.
+function transliterateTokens(text) {
+  return normalize(text).split(' ').filter(Boolean)
+    .map(w => TRANSLIT[w] || TRANSLIT[stripSuffixes(w)] || w);
+}
+
 // concept -> words to match against product names/categories (whole-word)
 function conceptWords(concept) {
   const entry = CONCEPTS.find(c => c.concept === concept);
@@ -199,9 +230,10 @@ function productSearchTokens(p) {
 }
 
 // score: whole-word concept matches rank first; then any query token matches
-function searchProducts(query, maxPrice) {
-  const concept = findConcept(query);
-  const qTokens = tokensOf(query);
+function searchProducts(query, maxPrice, loose) {
+  const enQuery = transliterateTokens(query).join(' ');
+  const concept = findConcept(query) || findConcept(enQuery);
+  const qTokens = transliterateTokens(query);
   const scored = [];
   for (const p of CATALOG) {
     if (p.stock <= 0) continue;
@@ -215,7 +247,6 @@ function searchProducts(query, maxPrice) {
       for (const cw of conceptWords(concept)) {
         const cTokens = cw.split(' ');
         if (cTokens.every(t => hasToken(nameHay, t))) score += 10;
-        else if (cTokens.some(t => hasToken(nameHay, t))) score += 4;
       }
       // category match is a strong signal (e.g. category "Lip Liner")
       if (catHay.join(' ').includes(concept)) score += 6;
@@ -230,7 +261,9 @@ function searchProducts(query, maxPrice) {
   // inflate the "more designs" count with the wrong items. A category-only
   // match scores 6 and counts: a product whose only signal is its category
   // (e.g. a photo album in Women's Bag) is genuinely in that category.
-  const filtered = concept ? scored.filter(s => s.score >= 6) : scored;
+  // Loose mode (fallback only): any scored product counts, so the bot shows
+  // the closest items instead of giving up entirely.
+  const filtered = (concept && !loose) ? scored.filter(s => s.score >= 6) : scored;
   filtered.sort((a, b) => b.score - a.score || a.p.price - b.p.price);
   return filtered.map(s => s.p);
 }
@@ -507,7 +540,10 @@ function brain(psid, rawText) {
 
   // ---- product search ----
   const budget = extractBudget(text);
-  const results = searchProducts(text, budget);
+  let results = searchProducts(text, budget);
+  // Nothing exact? Try a looser pass so the bot shows the closest items
+  // instead of giving up — e.g. a brand name it only partly understood.
+  if (!results.length) results = searchProducts(text, budget, true);
   if (results.length) {
     const top = results.slice(0, 5);
     s.lastList = top;
