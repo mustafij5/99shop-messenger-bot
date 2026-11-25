@@ -21,7 +21,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // an overloaded model. Lite first: it is the reliable one right now and has the
 // bigger free quota (500 calls/day vs ~20 for 3.8-flash).
 const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite,gemini-3.8-flash').split(',').map(s => s.trim()).filter(Boolean);
-const VERSION = '1.3-smart';
+const VERSION = '1.4-terms';
 const BOT_STATE_FILE = path.join(__dirname, 'bot-state.json');
 const API_BASE = 'https://backend.e99shop.com/api/v2/products';
 const GRAPH_API = 'https://graph.facebook.com/v21.0/me/messages';
@@ -767,6 +767,28 @@ app.get('/privacy', (_req, res) => {
 <h2>যোগাযোগ</h2>
 <p>99 Shop Bangladesh, Shop No# 117, 3rd Floor, Newmarket City Complex, Dhaka-1205। ফোন/WhatsApp: 01918107441, ইমেইল: info@99shop.com।</p>
 <p><i>What data the bot collects: your Messenger messages (text and photos) and sender ID, only to reply and take orders; order details (name, phone, address, items) only for delivery. Photos are sent to Google Gemini only to match products. Data is never sold, and is shared only with Meta's Messenger platform and the shop's own catalog server. To delete your data, see the deletion page or email info@99shop.com.</i></p>
+</body></html>`);
+});
+
+// Terms of service (Meta's Terms of Service URL)
+app.get('/terms', (_req, res) => {
+  res.send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>শর্তাবলী — 99 Shop</title></head><body>
+<h1>শর্তাবলী (Terms of Service) — 99 Shop Bangladesh</h1>
+<p>99 Shop Bangladesh (e99shop.com) থেকে মেসেঞ্জারের মাধ্যমে অর্ডার করলে নিচের শর্তগুলো প্রযোজ্য।</p>
+<h2>দাম ও পেমেন্ট</h2>
+<ul><li>সব দাম বাংলাদেশি টাকায় (৳)। ওয়েবসাইটে ও মেসেঞ্জারে দেখানো দামই প্রযোজ্য।</li>
+<li>সারাদেশে ক্যাশ অন ডেলিভারি (Cash on Delivery) — পণ্য হাতে পেয়ে মূল্য পরিশোধ করবেন।</li></ul>
+<h2>ডেলিভারি</h2>
+<ul><li>ঢাকা শহর: ৮০ টাকা, ১–২ দিন। ঢাকার আশেপাশে (সাভার, কেরানীগঞ্জ, নারায়ণগঞ্জ, গাজীপুর): ১১০ টাকা। দেশের বাকি এলাকা: ১৪০ টাকা, ১–৪ দিন।</li>
+<li>২,০০০ টাকার বেশি অর্ডারে ডেলিভারি চার্জ ফ্রি।</li></ul>
+<h2>রিটার্ন</h2>
+<p>পণ্যে সমস্যা থাকলে ৭ দিনের মধ্যে সহজ রিটার্নের ব্যবস্থা আছে — ফোন/WhatsApp 01918107441 বা info@99shop.com-এ জানাবেন।</p>
+<h2>অর্ডার</h2>
+<ul><li>মেসেঞ্জার বটের মাধ্যমে অর্ডার করলে নাম, মোবাইল নম্বর ও ঠিকানা দিতে হবে — শুধু ডেলিভারির জন্য ব্যবহার করা হবে।</li>
+<li>পণ্যের মজুদ (স্টক) সাপেক্ষে অর্ডার নেওয়া হয়; স্টক শেষ হলে জানিয়ে দেওয়া হবে।</li></ul>
+<h2>যোগাযোগ</h2>
+<p>99 Shop Bangladesh, Shop No# 117, 3rd Floor, Newmarket City Complex, Dhaka-1205। ফোন/WhatsApp: 01918107441, ইমেইল: info@99shop.com।</p>
+<p><i>Prices are in Bangladeshi Taka (৳). Cash on Delivery nationwide. Delivery: Dhaka city ৳80 (1–2 days), nearby Dhaka (Savar, Keraniganj, Narayanganj, Gazipur) ৳110, rest of Bangladesh ৳140 (1–4 days); free delivery on orders over ৳2,000. Easy returns within 7 days for faulty items — contact 01918107441 or info@99shop.com. Orders are subject to stock availability.</i></p>
 </body></html>`);
 });
 
