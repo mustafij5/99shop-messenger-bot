@@ -25,6 +25,7 @@ const API_BASE = 'https://backend.e99shop.com/api/v2/products';
 const GRAPH_API = 'https://graph.facebook.com/v21.0/me/messages';
 const ORDERS_FILE = path.join(__dirname, 'orders.json');
 const UNANSWERED_FILE = path.join(__dirname, 'unanswered.json');
+const CACHE_FILE = path.join(__dirname, 'catalog-cache.json');
 
 // ---- Shop facts (confirmed by the owner) ----
 const SHOP = {
@@ -80,6 +81,24 @@ async function loadCatalog() {
   CATALOG = [...byName.values()];
   catalogLoadedAt = new Date();
   console.log(`catalog loaded: ${CATALOG.length} products`);
+  // Save a snapshot so a cold start (after the free host sleeps) can answer
+  // instantly from the cache while the fresh catalog loads in the background.
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(CATALOG)); } catch (e) { console.error('catalog cache write failed', e.message); }
+}
+
+// Load the cached snapshot at startup (if any) so the bot can answer before
+// the first live API fetch finishes.
+function loadCatalogCache() {
+  try {
+    const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    if (Array.isArray(data) && data.length > 100) {
+      CATALOG = data;
+      catalogLoadedAt = new Date();
+      console.log(`catalog loaded from cache: ${CATALOG.length} products`);
+      return true;
+    }
+  } catch { /* no usable cache — the live load below fills the catalog */ }
+  return false;
 }
 setInterval(() => { loadCatalog().catch(e => console.error('catalog refresh failed', e.message)); }, 6 * 60 * 60 * 1000);
 
@@ -219,7 +238,7 @@ function fmtPrice(p) {
 // ---------------- Sessions (per Facebook sender) ----------------
 const sessions = new Map(); // psid -> {state, items:[{product,qty}], lastList:[products], name, phone, address, area}
 function sessionFor(psid) {
-  if (!sessions.has(psid)) sessions.set(psid, { state: 'idle', items: [], lastList: [] });
+  if (!sessions.has(psid)) sessions.set(psid, { state: 'idle', items: [], lastList: [], suggested: false });
   return sessions.get(psid);
 }
 
@@ -240,6 +259,85 @@ function deliveryFor(addressText) {
   // "ঢাকা" with no sub-area => Dhaka; anything else => outside
   if (t.includes('ঢাকা') || t.includes('dhaka')) return { zone: 'dhaka', charge: SHOP.deliveryDhaka };
   return { zone: 'outside', charge: SHOP.deliveryOutside };
+}
+
+// ---------------- Soft upsell (one gentle suggestion per order) ----------------
+// Rules the owner set: suggest at most ONE matching product, once per order,
+// right before confirmation. "না" (or ignoring it) ends it for that order —
+// the bot never suggests twice in one conversation and never pushes.
+const PAIRINGS = [
+  { from: 'earring', suggest: 'necklace' },
+  { from: 'necklace', suggest: 'earring' },
+  { from: 'lip liner', suggest: 'lipstick' },
+  { from: 'lipstick', suggest: 'lip liner' },
+  { from: 'eyeliner', suggest: 'mascara' },
+  { from: 'mascara', suggest: 'eyeliner' },
+  { from: 'kajal', suggest: 'eyeliner' },
+  { from: 'ring', suggest: 'bracelet' },
+  { from: 'bracelet', suggest: 'ring' },
+  { from: 'bag', suggest: 'perfume' },
+  { from: 'watch', suggest: 'bracelet' },
+  { from: 'foundation', suggest: 'cream' },
+  { from: 'cream', suggest: 'foundation' },
+  { from: 'shampoo', suggest: 'cream' },
+  { from: 'nail polish', suggest: 'lipstick' },
+  { from: 'makeup', suggest: 'lipstick' },
+  { from: 'lip gloss', suggest: 'lipstick' },
+  { from: 'lip balm', suggest: 'lip gloss' },
+];
+
+function pickSuggestion(items) {
+  const ordered = new Set(items.map(i => i.product.name.toLowerCase()));
+  for (const it of items) {
+    const concept = findConcept(it.product.name + ' ' + it.product.category);
+    const pairing = PAIRINGS.find(p => p.from === concept);
+    if (!pairing) continue;
+    const cands = searchProducts(pairing.suggest, null)
+      .filter(p => p.stock > 0 && !ordered.has(p.name.toLowerCase()));
+    if (cands.length) return cands[0];
+  }
+  // fallback: cheapest in-stock item from the same category as the first item
+  const first = items[0];
+  if (first) {
+    const cands = CATALOG
+      .filter(p => p.stock > 0 && p.category === first.product.category && !ordered.has(p.name.toLowerCase()))
+      .sort((a, b) => a.price - b.price);
+    if (cands.length) return cands[0];
+  }
+  return null;
+}
+
+function computeTotals(s) {
+  const subtotal = s.items.reduce((a, i) => a + i.product.price * i.qty, 0);
+  const delivery = subtotal >= SHOP.freeDeliveryAbove ? 0 : (s.zoneCharge || 0);
+  s.deliveryCharge = delivery;
+  return { subtotal, delivery, total: subtotal + delivery };
+}
+
+function orderSummaryText(s) {
+  const { subtotal, delivery, total } = computeTotals(s);
+  const lines = s.items.map(i => `• ${i.product.name} × ${i.qty} — ${i.product.price * i.qty} টাকা`).join('\n');
+  return `অর্ডারের বিবরণ:\n${lines}\nপণ্যের মোট: ${subtotal} টাকা\nডেলিভারি চার্জ: ${delivery === 0 ? 'ফ্রি' : delivery + ' টাকা'}\nসর্বমোট: ${total} টাকা\nনাম: ${s.name}\nফোন: ${s.phone}\nঠিকানা: ${s.address}`;
+}
+
+function finalizeOrder(s, psid) {
+  const { subtotal, delivery, total } = computeTotals(s);
+  const order = {
+    id: 'ORD-' + Date.now().toString(36).toUpperCase(),
+    time: new Date().toISOString(),
+    psid,
+    items: s.items.map(i => ({ name: i.product.name, price: i.product.price, qty: i.qty })),
+    subtotal, delivery, total,
+    name: s.name, phone: s.phone, address: s.address, area: s.area,
+    status: 'নতুন',
+  };
+  appendJson(ORDERS_FILE, order);
+  const oid = order.id;
+  sessions.set(psid, { state: 'idle', items: [], lastList: [], suggested: false });
+  return {
+    text: `অর্ডার কনফার্ম হয়েছে! 🎉\nঅর্ডার নম্বর: ${oid}\nসর্বমোট: ${total} টাকা (ক্যাশ অন ডেলিভারি)\n${SHOP.deliveryDays}-এর মধ্যে পৌঁছে যাবে। কোনো প্রয়োজনে কল করুন: ${SHOP.phone}`,
+    images: [],
+  };
 }
 
 // ---------------- Reply brain ----------------
@@ -275,39 +373,68 @@ function brain(psid, rawText) {
     s.address = text;
     const d = deliveryFor(text);
     s.area = d.zone;
-    const subtotal = s.items.reduce((a, i) => a + i.product.price * i.qty, 0);
-    const delivery = subtotal >= SHOP.freeDeliveryAbove ? 0 : d.charge;
-    s.deliveryCharge = delivery;
-    const lines = s.items.map(i => `• ${i.product.name} × ${i.qty} — ${i.product.price * i.qty} টাকা`).join('\n');
+    s.zoneCharge = d.charge;
+    // Soft upsell: at most once per order, one matching product, easy to refuse.
+    if (!s.suggested) {
+      const sug = pickSuggestion(s.items);
+      if (sug) {
+        s.suggested = true;
+        s.suggestedProduct = sug;
+        s.state = 'awaiting_suggestion';
+        return {
+          text: `${orderSummaryText(s)}\n\nএকটা ছোট সাজেশন — ${sug.name} (${fmtPrice(sug)}) আপনার অর্ডারের সাথে ভালো মানাবে, অনেকেই একসাথে নেন। যোগ করবো? "হ্যাঁ" লিখলে যোগ হয়ে যাবে। আর কিছু যোগ করতে চাইলে প্রোডাক্টের নাম লিখুন, না হলে "কনফার্ম" লিখুন।`,
+          images: sug.image ? [{ url: sug.image, name: sug.name }] : [],
+        };
+      }
+    }
     s.state = 'awaiting_confirm';
     return {
-      text: `অর্ডারের বিবরণ:\n${lines}\nপণ্যের মোট: ${subtotal} টাকা\nডেলিভারি চার্জ: ${delivery === 0 ? 'ফ্রি' : delivery + ' টাকা'}\nসর্বমোট: ${subtotal + delivery} টাকা\nনাম: ${s.name}\nফোন: ${s.phone}\nঠিকানা: ${s.address}\n\nসব ঠিক থাকলে "কনফার্ম" লিখুন।`,
+      text: `${orderSummaryText(s)}\n\nসব ঠিক থাকলে "কনফার্ম" লিখুন।`,
       images: [],
     };
   }
+  if (s.state === 'awaiting_suggestion') {
+    const sug = s.suggestedProduct;
+    // "হ্যাঁ" -> add the suggested product (qty 1), then show updated summary
+    if (/^(হ্যাঁ|হ্যা|yes|যোগ করো|যোগ করুন|নেবো|নেব|নিতে চাই|ঠিক আছে|ok|okay)/.test(norm)) {
+      if (sug) s.items.push({ product: sug, qty: 1 });
+      s.suggestedProduct = null;
+      s.state = 'awaiting_confirm';
+      return { text: `${orderSummaryText(s)}\n\nসব ঠিক থাকলে "কনফার্ম" লিখুন।`, images: [] };
+    }
+    // "কনফার্ম" -> confirm the order right away (no extra step)
+    if (/^(কনফার্ম|confirm)/.test(norm)) {
+      return finalizeOrder(s, psid);
+    }
+    // "বাতিল" -> cancel
+    if (/^(বাতিল|cancel)/.test(norm)) {
+      sessions.set(psid, { state: 'idle', items: [], lastList: [], suggested: false });
+      return { text: 'ঠিক আছে, অর্ডারটি বাতিল করা হলো। আর কিছু লাগলে জানাবেন।', images: [] };
+    }
+    // "না" -> skip the suggestion, show summary for confirmation
+    if (/^(না|no|লাগবে না|দরকার নেই|থাক)/.test(norm)) {
+      s.suggestedProduct = null;
+      s.state = 'awaiting_confirm';
+      return { text: `${orderSummaryText(s)}\n\nসব ঠিক থাকলে "কনফার্ম" লিখুন।`, images: [] };
+    }
+    // a product name -> add that product (qty 1) instead
+    const hits = searchProducts(text, null);
+    if (hits.length) {
+      const prod = hits[0];
+      const already = s.items.some(i => i.product.name === prod.name);
+      if (!already) s.items.push({ product: prod, qty: 1 });
+      s.suggestedProduct = null;
+      s.state = 'awaiting_confirm';
+      return { text: `${already ? 'এই প্রোডাক্টটা অর্ডারে আগেই আছে।' : prod.name + ' যোগ করা হলো।'}\n${orderSummaryText(s)}\n\nসব ঠিক থাকলে "কনফার্ম" লিখুন।`, images: prod.image ? [{ url: prod.image, name: prod.name }] : [] };
+    }
+    return { text: 'সাজেশনটা যোগ করতে "হ্যাঁ" লিখুন, আর কিছু যোগ করতে চাইলে প্রোডাক্টের নাম লিখুন। অর্ডার শেষ করতে "কনফার্ম" লিখুন।', images: [] };
+  }
   if (s.state === 'awaiting_confirm') {
     if (/^(কনফার্ম|confirm|হ্যাঁ|হ্যা|yes|ঠিক আছে|ok)/.test(norm)) {
-      const subtotal = s.items.reduce((a, i) => a + i.product.price * i.qty, 0);
-      const total = subtotal + (s.deliveryCharge || 0);
-      const order = {
-        id: 'ORD-' + Date.now().toString(36).toUpperCase(),
-        time: new Date().toISOString(),
-        psid,
-        items: s.items.map(i => ({ name: i.product.name, price: i.product.price, qty: i.qty })),
-        subtotal, delivery: s.deliveryCharge || 0, total,
-        name: s.name, phone: s.phone, address: s.address, area: s.area,
-        status: 'নতুন',
-      };
-      appendJson(ORDERS_FILE, order);
-      const oid = order.id;
-      sessions.set(psid, { state: 'idle', items: [], lastList: [] });
-      return {
-        text: `অর্ডার কনফার্ম হয়েছে! 🎉\nঅর্ডার নম্বর: ${oid}\nসর্বমোট: ${total} টাকা (ক্যাশ অন ডেলিভারি)\n${SHOP.deliveryDays}-এর মধ্যে পৌঁছে যাবে। কোনো প্রয়োজনে কল করুন: ${SHOP.phone}`,
-        images: [],
-      };
+      return finalizeOrder(s, psid);
     }
     if (/^(না|no|বাতিল|cancel)/.test(norm)) {
-      sessions.set(psid, { state: 'idle', items: [], lastList: [] });
+      sessions.set(psid, { state: 'idle', items: [], lastList: [], suggested: false });
       return { text: 'ঠিক আছে, অর্ডারটি বাতিল করা হলো। আর কিছু লাগলে জানাবেন।', images: [] };
     }
     return { text: 'কনফার্ম করতে "কনফার্ম" লিখুন, আর বাতিল করতে "বাতিল" লিখুন।', images: [] };
@@ -598,6 +725,7 @@ app.get('/orders', (req, res) => {
 });
 
 if (require.main === module) {
+  loadCatalogCache(); // instant catalog from snapshot; refreshed below
   loadCatalog().catch(e => console.error('initial catalog load failed', e.message));
   app.listen(PORT, () => console.log(`99 Shop bot listening on :${PORT} (dryRun=${DRY_RUN})`));
 }
