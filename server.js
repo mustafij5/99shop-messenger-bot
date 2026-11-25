@@ -21,6 +21,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // an overloaded model. Lite first: it is the reliable one right now and has the
 // bigger free quota (500 calls/day vs ~20 for 3.8-flash).
 const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite,gemini-3.8-flash').split(',').map(s => s.trim()).filter(Boolean);
+const VERSION = '1.1-diag';
 const API_BASE = 'https://backend.e99shop.com/api/v2/products';
 const GRAPH_API = 'https://graph.facebook.com/v21.0/me/messages';
 const ORDERS_FILE = path.join(__dirname, 'orders.json');
@@ -635,13 +636,18 @@ async function sendToFacebook(psid, reply) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ recipient: { id: psid }, message: { text: reply.text } }),
   });
-  out.push(await textRes.json().catch(() => ({})));
+  const textBody = await textRes.json().catch(() => ({}));
+  if (!textRes.ok) console.error('graph send failed', textRes.status, JSON.stringify(textBody).slice(0, 500));
+  else console.log('graph send ok to', psid, JSON.stringify(textBody).slice(0, 200));
+  out.push(textBody);
   for (const img of (reply.images || []).slice(0, 3)) {
     const r = await fetch(`${GRAPH_API}?access_token=${encodeURIComponent(PAGE_ACCESS_TOKEN)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipient: { id: psid }, message: { attachment: { type: 'image', payload: { url: img.url, is_reusable: true } } } }),
     });
-    out.push(await r.json().catch(() => ({})));
+    const imgBody = await r.json().catch(() => ({}));
+    if (!r.ok) console.error('graph image send failed', r.status, JSON.stringify(imgBody).slice(0, 500));
+    out.push(imgBody);
   }
   return out;
 }
@@ -660,7 +666,25 @@ function verifySignature(req) {
 }
 
 app.get('/', (_req, res) => res.send(`99 Shop Messenger bot — alive. Products in catalog: ${CATALOG.length}.`));
-app.get('/health', (_req, res) => res.json({ ok: true, products: CATALOG.length, loadedAt: catalogLoadedAt }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: VERSION, products: CATALOG.length, loadedAt: catalogLoadedAt }));
+
+// Diagnostics (admin only): checks the Page token against the Graph API and
+// reports whether the bot can actually send. Never returns the token itself.
+app.get('/diag', async (req, res) => {
+  if (req.query.token !== ADMIN_TOKEN) return res.sendStatus(403);
+  let graph = { ok: false };
+  if (!PAGE_ACCESS_TOKEN) graph = { ok: false, error: 'no PAGE_ACCESS_TOKEN set' };
+  else {
+    try {
+      const r = await fetch(`https://graph.facebook.com/v21.0/me?fields=id,name&access_token=${encodeURIComponent(PAGE_ACCESS_TOKEN)}`);
+      const j = await r.json().catch(() => ({}));
+      graph = r.ok
+        ? { ok: true, id: j.id, name: j.name }
+        : { ok: false, status: r.status, error: j.error && j.error.message, code: j.error && j.error.code };
+    } catch (e) { graph = { ok: false, error: e.message }; }
+  }
+  res.json({ ok: true, version: VERSION, products: CATALOG.length, dryRun: DRY_RUN, hasPageToken: !!PAGE_ACCESS_TOKEN, pageTokenLength: PAGE_ACCESS_TOKEN.length, hasAppSecret: !!APP_SECRET, graph });
+});
 
 // Facebook webhook verification
 app.get('/webhook', (req, res) => {
@@ -681,6 +705,7 @@ app.post('/webhook', async (req, res) => {
     for (const ev of entry.messaging || []) {
       const sender = ev.sender && ev.sender.id;
       if (!sender || !ev.message || ev.message.is_echo) continue;
+      console.log('webhook event from', sender, 'text:', (ev.message.text || '').slice(0, 100), 'attachments:', (ev.message.attachments || []).length);
       try {
         const atts = (ev.message.attachments || []).filter(a => a.type === 'image' && a.payload && a.payload.url);
         let reply;
