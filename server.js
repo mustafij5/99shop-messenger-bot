@@ -21,7 +21,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // an overloaded model. Lite first: it is the reliable one right now and has the
 // bigger free quota (500 calls/day vs ~20 for 3.8-flash).
 const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite,gemini-3.8-flash').split(',').map(s => s.trim()).filter(Boolean);
-const VERSION = '1.1-diag';
+const VERSION = '1.2-switch';
+const BOT_STATE_FILE = path.join(__dirname, 'bot-state.json');
 const API_BASE = 'https://backend.e99shop.com/api/v2/products';
 const GRAPH_API = 'https://graph.facebook.com/v21.0/me/messages';
 const ORDERS_FILE = path.join(__dirname, 'orders.json');
@@ -40,6 +41,19 @@ const SHOP = {
 };
 const SUB_DHAKA = ['savar', 'সাভার', 'keraniganj', 'কেরানীগঞ্জ', 'keranigonj',
   'narayanganj', 'নারায়ণগঞ্জ', 'gazipur', 'গাজীপুর', 'tongi', 'টঙ্গী'];
+
+// ---------------- Bot on/off switch (owner control) ----------------
+// When off, the bot stays completely SILENT: it still answers Meta's webhook
+// with 200 (so nothing breaks), but it sends no reply at all — not even an
+// "offline" message. State lives in bot-state.json (default: on).
+let BOT_ENABLED = true;
+try {
+  const st = JSON.parse(fs.readFileSync(BOT_STATE_FILE, 'utf8'));
+  if (typeof st.enabled === 'boolean') BOT_ENABLED = st.enabled;
+} catch { /* no state file yet — default on */ }
+function saveBotState() {
+  try { fs.writeFileSync(BOT_STATE_FILE, JSON.stringify({ enabled: BOT_ENABLED })); } catch (e) { console.error('bot state save failed', e.message); }
+}
 
 // ---------------- Catalog ----------------
 let CATALOG = []; // {id,name,price,compareAt,category,image,stock}
@@ -686,6 +700,49 @@ app.get('/diag', async (req, res) => {
   res.json({ ok: true, version: VERSION, products: CATALOG.length, dryRun: DRY_RUN, hasPageToken: !!PAGE_ACCESS_TOKEN, pageTokenLength: PAGE_ACCESS_TOKEN.length, hasAppSecret: !!APP_SECRET, graph });
 });
 
+// Bot on/off switch (admin only)
+app.get('/bot-state', (req, res) => {
+  if (req.query.token !== ADMIN_TOKEN) return res.sendStatus(403);
+  res.json({ ok: true, enabled: BOT_ENABLED });
+});
+app.post('/bot-toggle', express.urlencoded({ extended: false }), (req, res) => {
+  if (req.query.token !== ADMIN_TOKEN && req.body.token !== ADMIN_TOKEN) return res.sendStatus(403);
+  BOT_ENABLED = req.body.enabled === '1' || req.body.enabled === 'true';
+  saveBotState();
+  console.log('bot', BOT_ENABLED ? 'enabled' : 'disabled');
+  const token = req.query.token || req.body.token;
+  res.redirect(`/orders?token=${encodeURIComponent(token)}`);
+});
+
+// Privacy policy (used as Meta's Privacy Policy URL) — Bengali + English
+app.get('/privacy', (_req, res) => {
+  res.send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>গোপনীয়তা নীতি — 99 Shop</title></head><body>
+<h1>গোপনীয়তা নীতি (Privacy Policy) — 99 Shop Bangladesh</h1>
+<p>99 Shop Bangladesh-এর ফেসবুক মেসেঞ্জার বট ("99 Shop Bot") ব্যবহারকারীদের মেসেজের উত্তর দেয় এবং অর্ডার নেয়। এই নীতি ব্যাখ্যা করে বটটি কী তথ্য সংগ্রহ করে ও কীভাবে ব্যবহার করে।</p>
+<h2>কী তথ্য সংগ্রহ করা হয়</h2>
+<ul><li>আপনার মেসেঞ্জার বার্তা (টেক্সট ও ছবি) এবং ফেসবুক প্রেরক আইডি — শুধু উত্তর দিতে ও অর্ডার নিতে।</li>
+<li>অর্ডারের তথ্য (নাম, মোবাইল নম্বর, ঠিকানা, পণ্য) — শুধু ডেলিভারির জন্য।</li></ul>
+<h2>তথ্য কীভাবে ব্যবহার করা হয়</h2>
+<ul><li>বার্তার উত্তর ও অর্ডার প্রক্রিয়াকরণ ছাড়া অন্য কোনো কাজে তথ্য ব্যবহার করা হয় না।</li>
+<li>ছবি পাঠালে ছবিটি শুধু পণ্য মেলাতে Google Gemini-তে পাঠানো হয়, অন্য কোথাও সংরক্ষণ করা হয় না।</li>
+<li>তথ্য তৃতীয় পক্ষের কাছে বিক্রি বা ভাড়া দেওয়া হয় না। Facebook (Messenger প্ল্যাটফর্ম) ও দোকানের ক্যাটালগ সার্ভার ছাড়া কারো সাথে শেয়ার করা হয় না।</li></ul>
+<h2>তথ্য মুছতে চাইলে</h2>
+<p>আপনার তথ্য মুছে ফেলতে <a href="/delete-data">তথ্য মোছার পাতা</a> দেখুন, অথবা info@99shop.com-এ ইমেইল করুন বা 01918107441 নম্বরে কল করুন।</p>
+<h2>যোগাযোগ</h2>
+<p>99 Shop Bangladesh, Shop No# 117, 3rd Floor, Newmarket City Complex, Dhaka-1205। ফোন/WhatsApp: 01918107441, ইমেইল: info@99shop.com।</p>
+<p><i>What data the bot collects: your Messenger messages (text and photos) and sender ID, only to reply and take orders; order details (name, phone, address, items) only for delivery. Photos are sent to Google Gemini only to match products. Data is never sold, and is shared only with Meta's Messenger platform and the shop's own catalog server. To delete your data, see the deletion page or email info@99shop.com.</i></p>
+</body></html>`);
+});
+
+// User data deletion instructions (Meta's User Data Deletion URL)
+app.get('/delete-data', (_req, res) => {
+  res.send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>তথ্য মোছা — 99 Shop</title></head><body>
+<h1>তথ্য মোছার অনুরোধ (Data Deletion)</h1>
+<p>99 Shop Bot আপনার যে তথ্য রেখেছে (মেসেজ, অর্ডারের তথ্য) তা মুছে ফেলতে চাইলে info@99shop.com-এ ইমেইল করুন অথবা 01918107441 নম্বরে কল/WhatsApp করুন। আপনার ফেসবুক নাম ও মোবাইল নম্বর জানাবেন, যাতে আপনার অর্ডারটি খুঁজে পাওয়া যায়। অনুরোধ পাওয়ার ৭ দিনের মধ্যে আপনার তথ্য মুছে ফেলা হবে এবং ইমেইলে/মেসেজে জানানো হবে।</p>
+<p><i>To request deletion of your data, email info@99shop.com or call/WhatsApp 01918107441 with your Facebook name and phone number. Your data will be deleted within 7 days.</i></p>
+</body></html>`);
+});
+
 // Facebook webhook verification
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -701,6 +758,7 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
   if (body.object !== 'page') return res.sendStatus(404);
   res.status(200).send('EVENT_RECEIVED');
+  if (!BOT_ENABLED) { console.log('bot disabled — ignoring incoming message'); return; }
   for (const entry of body.entry || []) {
     for (const ev of entry.messaging || []) {
       const sender = ev.sender && ev.sender.id;
@@ -741,12 +799,16 @@ app.get('/refresh', async (req, res) => {
   res.json({ ok: true, products: CATALOG.length });
 });
 
-// Simple orders admin page
+// Simple orders admin page (also hosts the bot on/off switch)
 app.get('/orders', (req, res) => {
   if (req.query.token !== ADMIN_TOKEN) return res.sendStatus(403);
   const orders = readJson(ORDERS_FILE, []).slice().reverse();
   const rows = orders.map(o => `<tr><td>${o.id}</td><td>${o.time}</td><td>${o.items.map(i => `${i.name} × ${i.qty}`).join('<br>')}</td><td>${o.total} টাকা</td><td>${o.name}<br>${o.phone}<br>${o.address}</td><td>${o.status}</td></tr>`).join('');
-  res.send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>অর্ডার তালিকা — 99 Shop</title></head><body><h1>অর্ডার তালিকা (${orders.length})</h1><table border="1" cellpadding="6"><tr><th>নম্বর</th><th>সময়</th><th>পণ্য</th><th>মোট</th><th>কাস্টমার</th><th>অবস্থা</th></tr>${rows}</table></body></html>`);
+  const token = encodeURIComponent(req.query.token);
+  const switchBox = BOT_ENABLED
+    ? `<p>বটের অবস্থা: <b>চালু ✅</b></p><form method="POST" action="/bot-toggle?token=${token}"><input type="hidden" name="enabled" value="0"><button type="submit">বট বন্ধ করুন</button></form><p>বন্ধ থাকলে বট একদম চুপ থাকবে — কোনো মেসেজের উত্তর দেবে না।</p>`
+    : `<p>বটের অবস্থা: <b>বন্ধ ⏸️</b></p><form method="POST" action="/bot-toggle?token=${token}"><input type="hidden" name="enabled" value="1"><button type="submit">বট চালু করুন</button></form><p>বন্ধ থাকলে বট একদম চুপ থাকে — কোনো মেসেজের উত্তর দেয় না।</p>`;
+  res.send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>অর্ডার তালিকা — 99 Shop</title></head><body><h1>অর্ডার তালিকা (${orders.length})</h1>${switchBox}<table border="1" cellpadding="6"><tr><th>নম্বর</th><th>সময়</th><th>পণ্য</th><th>মোট</th><th>কাস্টমার</th><th>অবস্থা</th></tr>${rows}</table></body></html>`);
 });
 
 if (require.main === module) {
