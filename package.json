@@ -1,0 +1,1 @@
+{"dependencies":{"express":"^4.21.2"},"description":"Facebook Messenger webhook for 99 Shop Bangladesh — answers from the e99shop.com catalog and takes orders.","engines":{"node":">=18"},"main":"server.js","name":"99shop-messenger-bot","scripts":{"start":"node server.js"},"version":"1.0.0"}
