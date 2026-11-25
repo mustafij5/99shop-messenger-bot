@@ -1,0 +1,25 @@
+# Render Blueprint — deploys the bot as a free web service.
+# In Render: New + -> Blueprint -> connect this repo. Then set the env vars
+# in the Render dashboard (see README.md).
+services:
+  - type: web
+    name: 99shop-messenger-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: PAGE_ACCESS_TOKEN
+        sync: false
+      - key: APP_SECRET
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODELS
+        value: gemini-3.5-flash-lite,gemini-3.8-flash
+      - key: DRY_RUN
+        value: "0"
